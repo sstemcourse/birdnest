@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 生态监测仪表板</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f4f6f9;
+      margin: 0;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .cards {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+    .card {
+      flex: 1;
+      min-width: 220px;
+      background: #fff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      text-align: center;
+    }
+    .card .value {
+      font-size: 2em;
+      font-weight: bold;
+      margin-top: 8px;
+      color: #2c3e50;
+    }
+    .chart-container {
+      background: #fff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+    }
+    .gallery {
+      background: #fff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .photo-item {
+      border-radius: 6px;
+      overflow: hidden;
+      background: #eee;
+      position: relative;
+    }
+    .photo-item img {
+      width: 100%;
+      height: 150px;
+      object-fit: cover;
+      display: block;
+    }
+    .photo-item .time {
+      font-size: 0.8em;
+      padding: 6px;
+      background: rgba(0,0,0,0.7);
+      color: #fff;
+      position: absolute;
+      bottom: 0;
+      width: 100%;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🌱 ESP32 环境监测与图像记录</h1>
+
+    <div class="cards">
+      <div class="card">
+        <div>🌡️ 温度</div>
+        <div class="value" id="tempVal">-- °C</div>
+      </div>
+      <div class="card">
+        <div>💧 湿度</div>
+        <div class="value" id="humVal">-- %</div>
+      </div>
+      <div class="card">
+        <div>☀️ 光照强度</div>
+        <div class="value" id="luxVal">-- lx</div>
+      </div>
+    </div>
+
+    <div class="chart-container">
+      <h3>📈 历史数据趋势</h3>
+      <canvas id="envChart" height="100"></canvas>
+    </div>
+
+    <div class="gallery">
+      <h3>📷 采集照片墙</h3>
+      <div class="grid" id="photoGrid">
+        <!-- 照片由 JS 动态插入 -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ⚠️ 替换为你部署的 Google Apps Script Web App URL
+    const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyL-Fxl_M5zIiBqsNFGSXtkcFwuoqGM8jyBN-88k_CdDXadqAtPv2TfjbiDt39CGzyC/exec";
+
+    let chartInstance = null;
+
+    async function fetchData() {
+      try {
+        const response = await fetch(APPS_SCRIPT_URL);
+        const result = await response.json();
+
+        if (result.status === "success" && result.data.length > 0) {
+          const rows = result.data;
+          const latest = rows[rows.length - 1];
+
+          // 1. 更新卡片当前最新值
+          document.getElementById('tempVal').innerText = `${latest.temp} °C`;
+          document.getElementById('humVal').innerText = `${latest.hum} %`;
+          document.getElementById('luxVal').innerText = `${latest.lux} lx`;
+
+          // 2. 更新 Chart.js 折线图
+          const labels = rows.map(r => new Date(r.timestamp).toLocaleTimeString());
+          const temps = rows.map(r => r.temp);
+          const hums = rows.map(r => r.hum);
+          const luxs = rows.map(r => r.lux);
+
+          if (chartInstance) {
+            chartInstance.destroy();
+          }
+
+          const ctx = document.getElementById('envChart').getContext('2d');
+          chartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: labels,
+              datasets: [
+                { label: '温度 (°C)', data: temps, borderColor: '#e74c3c', fill: false, yAxisID: 'y' },
+                { label: '湿度 (%)', data: hums, borderColor: '#3498db', fill: false, yAxisID: 'y' },
+                { label: '光照 (lx)', data: luxs, borderColor: '#f1c40f', fill: false, yAxisID: 'y1' }
+              ]
+            },
+            options: {
+              responsive: true,
+              scales: {
+                y: { type: 'linear', position: 'left', title: { display: true, text: '温湿度' } },
+                y1: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '光照 (lx)' } }
+              }
+            }
+          });
+
+          // 3. 渲染照片墙
+          const photoGrid = document.getElementById('photoGrid');
+          photoGrid.innerHTML = '';
+          rows.slice().reverse().forEach(row => {
+            if (row.imageUrl) {
+              const item = document.createElement('div');
+              item.className = 'photo-item';
+              item.innerHTML = `
+                <a href="${row.imageUrl}" target="_blank">
+                  <img src="${row.imageUrl}" alt="ESP32 Capture">
+                </a>
+                <div class="time">${new Date(row.timestamp).toLocaleString()}</div>
+              `;
+              photoGrid.appendChild(item);
+            }
+          });
+        }
+      } catch (err) {
+        console.error("加载数据失败:", err);
+      }
+    }
+
+    // 页面加载时自动获取数据，并设为每 30 秒刷新一次
+    fetchData();
+    setInterval(fetchData, 30000);
+  </script>
+</body>
+</html>
