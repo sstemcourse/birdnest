@@ -1,197 +1,1144 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32 生态监测仪表板</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: #f4f6f9;
-      margin: 0;
-      padding: 20px;
-      color: #333;
-    }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    h1 {
-      text-align: center;
-      margin-bottom: 24px;
-    }
-    .cards {
-      display: flex;
-      gap: 16px;
-      margin-bottom: 24px;
-      flex-wrap: wrap;
-    }
-    .card {
-      flex: 1;
-      min-width: 220px;
-      background: #fff;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-      text-align: center;
-    }
-    .card .value {
-      font-size: 2em;
-      font-weight: bold;
-      margin-top: 8px;
-      color: #2c3e50;
-    }
-    .chart-container {
-      background: #fff;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-      margin-bottom: 24px;
-    }
-    .gallery {
-      background: #fff;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-      gap: 16px;
-      margin-top: 16px;
-    }
-    .photo-item {
-      border-radius: 6px;
-      overflow: hidden;
-      background: #eee;
-      position: relative;
-    }
-    .photo-item img {
-      width: 100%;
-      height: 150px;
-      object-fit: cover;
-      display: block;
-    }
-    .photo-item .time {
-      font-size: 0.8em;
-      padding: 6px;
-      background: rgba(0,0,0,0.7);
-      color: #fff;
-      position: absolute;
-      bottom: 0;
-      width: 100%;
-      box-sizing: border-box;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🌱 ESP32 环境监测与图像记录</h1>
+#include <stdbool.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <time.h>
 
-    <div class="cards">
-      <div class="card">
-        <div>🌡️ 温度</div>
-        <div class="value" id="tempVal">-- °C</div>
-      </div>
-      <div class="card">
-        <div>💧 湿度</div>
-        <div class="value" id="humVal">-- %</div>
-      </div>
-      <div class="card">
-        <div>☀️ 光照强度</div>
-        <div class="value" id="luxVal">-- lx</div>
-      </div>
-    </div>
+#include "esp_crt_bundle.h"
+#include "esp_event.h"
+#include "esp_heap_caps.h"
+#include "esp_http_client.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_sntp.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "driver/gpio.h"
+#include "driver/uart.h"
+#include "led_strip.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "mbedtls/base64.h"
+#include "mbedtls/md.h"
+#include "mqtt_client.h"
+#include "nvs_flash.h"
+#include "usb_stream.h"
 
-    <div class="chart-container">
-      <h3>📈 历史数据趋势</h3>
-      <canvas id="envChart" height="100"></canvas>
-    </div>
+#define CAMERA_BUFFER_SIZE (32 * 1024)
+#define CAPTURE_INTERVAL_MS 60000
+#define CAPTURE_TIMEOUT_MS 5000
+#define BASE64_INPUT_CHUNK_SIZE 3072
+#define SENSOR_UART_PORT UART_NUM_1
+#define SENSOR_UART_TX_GPIO CONFIG_PHOTO_SENSOR_UART_TX_GPIO
+#define SENSOR_UART_RX_GPIO CONFIG_PHOTO_SENSOR_UART_RX_GPIO
+#define SENSOR_UART_BUFFER_SIZE 1024
+#define TH_SENSOR_ADDRESS 0x02
+#define LUX_SENSOR_ADDRESS 0x01
+#define CAM_ID_DEFAULT 1
+#define CAM_ID_NAMESPACE "photo"
+#define CAM_ID_NVS_KEY "cam_id"
+#define MQTT_PRODUCT_ID_DEFAULT "ux9KDu8mdn"
+#define MQTT_ACCESS_KEY_DEFAULT "c3hQaVByaGtiTzRIMTREeDRNZFA3aldZUVpkSDQybnU="
+#define MQTT_PRODUCT_ID_NVS_KEY "mqtt_pid"
+#define MQTT_ACCESS_KEY_NVS_KEY "mqtt_key"
+#define WIFI_SSID_NVS_KEY "wifi_ssid"
+#define WIFI_PASSWORD_NVS_KEY "wifi_pwd"
+#define MQTT_PRODUCT_ID_SIZE 64
+#define MQTT_ACCESS_KEY_SIZE 128
+#define WIFI_SSID_SIZE 33
+#define WIFI_PASSWORD_SIZE 64
+#define STATUS_LED_GPIO GPIO_NUM_48
+#define STATUS_LED_DIM_BRIGHTNESS 24
+#define STATUS_LED_SEND_BRIGHTNESS 128
+#define STATUS_LED_FLASH_MS 120
+#define WIFI_CONNECTED_BIT BIT0
+#define USB_CAMERA_CONNECTED_BIT BIT0
+#define MQTT_BROKER_URI "mqtt://www.onenet.hk.chinamobile.com:1883"
+#define MQTT_RECONNECT_DELAY_US (2 * 1000 * 1000)
 
-    <div class="gallery">
-      <h3>📷 采集照片墙</h3>
-      <div class="grid" id="photoGrid">
-        <!-- 照片由 JS 动态插入 -->
-      </div>
-    </div>
-  </div>
+static const char *TAG = "photo_uploader";
+static const char *UPLOAD_URL = "https://script.google.com/macros/s/AKfycbyL-Fxl_M5zIiBqsNFGSXtkcFwuoqGM8jyBN-88k_CdDXadqAtPv2TfjbiDt39CGzyC/exec";
+static char s_mqtt_product_id[MQTT_PRODUCT_ID_SIZE] = MQTT_PRODUCT_ID_DEFAULT;
+static char s_mqtt_access_key[MQTT_ACCESS_KEY_SIZE] = MQTT_ACCESS_KEY_DEFAULT;
+static char s_wifi_ssid[WIFI_SSID_SIZE] = CONFIG_PHOTO_WIFI_SSID;
+static char s_wifi_password[WIFI_PASSWORD_SIZE] = CONFIG_PHOTO_WIFI_PASSWORD;
 
-  <script>
-    // ⚠️ 替换为你部署的 Google Apps Script Web App URL
-    const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyL-Fxl_M5zIiBqsNFGSXtkcFwuoqGM8jyBN-88k_CdDXadqAtPv2TfjbiDt39CGzyC/exec";
+static EventGroupHandle_t s_wifi_events;
+static EventGroupHandle_t s_usb_events;
+static SemaphoreHandle_t s_capture_ready;
+static SemaphoreHandle_t s_capture_release;
+static SemaphoreHandle_t s_status_led_mutex;
+static led_strip_handle_t s_status_led;
+static esp_mqtt_client_handle_t s_mqtt_client;
+static esp_timer_handle_t s_mqtt_retry_timer;
+static portMUX_TYPE s_capture_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_cam_id = CAM_ID_DEFAULT;
+static bool s_wifi_connected;
+static bool s_upload_active;
+static const uint8_t *s_capture_data;
+static size_t s_capture_size;
+static bool s_capture_requested;
+static bool s_first_frame_logged;
+static bool s_mqtt_connected;
 
-    let chartInstance = null;
+typedef struct
+{
+    float temperature;
+    float humidity;
+    float lux;
+} sensor_reading_t;
 
-    async function fetchData() {
-      try {
-        const response = await fetch(APPS_SCRIPT_URL);
-        const result = await response.json();
+static void refresh_onenet_connection(void);
 
-        if (result.status === "success" && result.data.length > 0) {
-          const rows = result.data;
-          const latest = rows[rows.length - 1];
+static void mqtt_retry_timer_callback(void *arg)
+{
+    if (!s_mqtt_connected)
+    {
+        ESP_LOGI(TAG, "Retrying OneNET MQTT connection after 2 seconds");
+        refresh_onenet_connection();
+    }
+}
 
-          // 1. 更新卡片当前最新值
-          document.getElementById('tempVal').innerText = `${latest.temp} °C`;
-          document.getElementById('humVal').innerText = `${latest.hum} %`;
-          document.getElementById('luxVal').innerText = `${latest.lux} lx`;
+static void status_led_render_locked(void)
+{
+    uint32_t red = 0;
+    uint32_t green = 0;
+    uint32_t blue = 0;
 
-          // 2. 更新 Chart.js 折线图
-          const labels = rows.map(r => new Date(r.timestamp).toLocaleTimeString());
-          const temps = rows.map(r => r.temp);
-          const hums = rows.map(r => r.hum);
-          const luxs = rows.map(r => r.lux);
+    if (s_wifi_connected)
+    {
+        blue = s_upload_active ? STATUS_LED_SEND_BRIGHTNESS : STATUS_LED_DIM_BRIGHTNESS;
+    }
+    else
+    {
+        green = STATUS_LED_DIM_BRIGHTNESS;
+    }
 
-          if (chartInstance) {
-            chartInstance.destroy();
-          }
+    ESP_ERROR_CHECK(led_strip_set_pixel(s_status_led, 0, red, green, blue));
+    ESP_ERROR_CHECK(led_strip_refresh(s_status_led));
+}
 
-          const ctx = document.getElementById('envChart').getContext('2d');
-          chartInstance = new Chart(ctx, {
-            type: 'line',
-            data: {
-              labels: labels,
-              datasets: [
-                { label: '温度 (°C)', data: temps, borderColor: '#e74c3c', fill: false, yAxisID: 'y' },
-                { label: '湿度 (%)', data: hums, borderColor: '#3498db', fill: false, yAxisID: 'y' },
-                { label: '光照 (lx)', data: luxs, borderColor: '#f1c40f', fill: false, yAxisID: 'y1' }
-              ]
-            },
-            options: {
-              responsive: true,
-              scales: {
-                y: { type: 'linear', position: 'left', title: { display: true, text: '温湿度' } },
-                y1: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '光照 (lx)' } }
-              }
+static void status_led_set_wifi_connected(bool connected)
+{
+    xSemaphoreTake(s_status_led_mutex, portMAX_DELAY);
+    s_wifi_connected = connected;
+    status_led_render_locked();
+    xSemaphoreGive(s_status_led_mutex);
+}
+
+static void status_led_flash_blue(void)
+{
+    xSemaphoreTake(s_status_led_mutex, portMAX_DELAY);
+    s_upload_active = true;
+    status_led_render_locked();
+    xSemaphoreGive(s_status_led_mutex);
+
+    vTaskDelay(pdMS_TO_TICKS(STATUS_LED_FLASH_MS));
+
+    xSemaphoreTake(s_status_led_mutex, portMAX_DELAY);
+    s_upload_active = false;
+    status_led_render_locked();
+    xSemaphoreGive(s_status_led_mutex);
+}
+
+static void status_led_init(void)
+{
+    s_status_led_mutex = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(s_status_led_mutex ? ESP_OK : ESP_ERR_NO_MEM);
+
+    const led_strip_config_t led_config = {
+        .strip_gpio_num = STATUS_LED_GPIO,
+        .max_leds = 1,
+        .led_pixel_format = LED_PIXEL_FORMAT_GRB,
+        .led_model = LED_MODEL_WS2812,
+    };
+    const led_strip_rmt_config_t rmt_config = {
+        .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = false,
+    };
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&led_config, &rmt_config, &s_status_led));
+    status_led_render_locked();
+}
+
+static uint32_t cam_id_get(void)
+{
+    portENTER_CRITICAL(&s_capture_mux);
+    uint32_t cam_id = s_cam_id;
+    portEXIT_CRITICAL(&s_capture_mux);
+    return cam_id;
+}
+
+static void mqtt_device_id_format(uint32_t cam_id, char *device_id, size_t device_id_size)
+{
+    snprintf(device_id, device_id_size, "group%u", (unsigned)cam_id);
+}
+
+static esp_err_t cam_id_load(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(CAM_ID_NAMESPACE, NVS_READONLY, &nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND)
+    {
+        return ESP_OK;
+    }
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+
+    uint32_t cam_id = CAM_ID_DEFAULT;
+    ret = nvs_get_u32(nvs, CAM_ID_NVS_KEY, &cam_id);
+    nvs_close(nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND)
+    {
+        return ESP_OK;
+    }
+    if (ret == ESP_OK)
+    {
+        s_cam_id = cam_id;
+        ESP_LOGI(TAG, "Loaded camId=%u from NVS", (unsigned)cam_id);
+    }
+    return ret;
+}
+
+static esp_err_t cam_id_save(uint32_t cam_id)
+{
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(CAM_ID_NAMESPACE, NVS_READWRITE, &nvs);
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+
+    ret = nvs_set_u32(nvs, CAM_ID_NVS_KEY, cam_id);
+    if (ret == ESP_OK)
+    {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    if (ret == ESP_OK)
+    {
+        portENTER_CRITICAL(&s_capture_mux);
+        s_cam_id = cam_id;
+        portEXIT_CRITICAL(&s_capture_mux);
+    }
+    return ret;
+}
+
+static esp_err_t config_string_load(const char *key, char *value, size_t value_size)
+{
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(CAM_ID_NAMESPACE, NVS_READONLY, &nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND)
+    {
+        ESP_LOGI(TAG, "NVS setting '%s' not found; using configured default", key);
+        return ESP_OK;
+    }
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+
+    ret = nvs_get_str(nvs, key, value, &value_size);
+    nvs_close(nvs);
+    if (ret == ESP_ERR_NVS_NOT_FOUND)
+    {
+        ESP_LOGI(TAG, "NVS setting '%s' not found; using configured default", key);
+        return ESP_OK;
+    }
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(TAG, "Loaded setting '%s' from NVS", key);
+    }
+    return ret;
+}
+
+static esp_err_t config_string_save(const char *key, const char *value)
+{
+    nvs_handle_t nvs;
+    esp_err_t ret = nvs_open(CAM_ID_NAMESPACE, NVS_READWRITE, &nvs);
+    if (ret != ESP_OK)
+    {
+        return ret;
+    }
+
+    ret = nvs_set_str(nvs, key, value);
+    if (ret == ESP_OK)
+    {
+        ret = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+
+    if (ret == ESP_OK)
+    {
+        char stored_value[MQTT_ACCESS_KEY_SIZE];
+        size_t stored_value_size = sizeof(stored_value);
+        ret = nvs_open(CAM_ID_NAMESPACE, NVS_READONLY, &nvs);
+        if (ret == ESP_OK)
+        {
+            ret = nvs_get_str(nvs, key, stored_value, &stored_value_size);
+            nvs_close(nvs);
+            if (ret == ESP_OK && strcmp(stored_value, value) != 0)
+            {
+                ret = ESP_FAIL;
             }
-          });
-
-          // 3. 渲染照片墙
-          const photoGrid = document.getElementById('photoGrid');
-          photoGrid.innerHTML = '';
-          rows.slice().reverse().forEach(row => {
-            if (row.imageUrl) {
-              const item = document.createElement('div');
-              item.className = 'photo-item';
-              item.innerHTML = `
-                <a href="${row.imageUrl}" target="_blank">
-                  <img src="${row.imageUrl}" alt="ESP32 Capture">
-                </a>
-                <div class="time">${new Date(row.timestamp).toLocaleString()}</div>
-              `;
-              photoGrid.appendChild(item);
-            }
-          });
         }
-      } catch (err) {
-        console.error("加载数据失败:", err);
-      }
+    }
+    return ret;
+}
+
+static bool mqtt_access_key_valid(const char *value)
+{
+    unsigned char decoded_key[(MQTT_ACCESS_KEY_SIZE * 3) / 4];
+    size_t decoded_key_size = 0;
+    return mbedtls_base64_decode(decoded_key, sizeof(decoded_key), &decoded_key_size,
+                                 (const unsigned char *)value, strlen(value)) == 0 &&
+           decoded_key_size > 0;
+}
+
+static bool save_string_command(const char *line, const char *prefix, const char *key,
+                                size_t max_length, const char *setting_name)
+{
+    size_t prefix_length = strlen(prefix);
+    if (strncmp(line, prefix, prefix_length) != 0)
+    {
+        return false;
     }
 
-    // 页面加载时自动获取数据，并设为每 30 秒刷新一次
-    fetchData();
-    setInterval(fetchData, 30000);
-  </script>
-</body>
-</html>
+    const char *value = line + prefix_length;
+    size_t value_length = strlen(value);
+    if (value_length == 0 || value_length > max_length)
+    {
+        ESP_LOGW(TAG, "Invalid %s length; expected 1..%u characters",
+                 setting_name, (unsigned)max_length);
+        return true;
+    }
+
+    if (strcmp(key, MQTT_ACCESS_KEY_NVS_KEY) == 0 && !mqtt_access_key_valid(value))
+    {
+        ESP_LOGW(TAG, "Invalid MQTT access key; expected a non-empty base64 value");
+        return true;
+    }
+
+    esp_err_t ret = config_string_save(key, value);
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(TAG, "%s saved to NVS; it will take effect after reboot", setting_name);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to save %s to NVS: %s", setting_name, esp_err_to_name(ret));
+    }
+    return true;
+}
+
+static void process_console_command(char *line)
+{
+    if (save_string_command(line, "AT+PID=", MQTT_PRODUCT_ID_NVS_KEY,
+                            MQTT_PRODUCT_ID_SIZE - 1, "MQTT product ID") ||
+        save_string_command(line, "AT+KEY=", MQTT_ACCESS_KEY_NVS_KEY,
+                            MQTT_ACCESS_KEY_SIZE - 1, "MQTT access key") ||
+        save_string_command(line, "AT+SSID=", WIFI_SSID_NVS_KEY,
+                            WIFI_SSID_SIZE - 1, "Wi-Fi SSID") ||
+        save_string_command(line, "AT+PWD=", WIFI_PASSWORD_NVS_KEY,
+                            WIFI_PASSWORD_SIZE - 1, "Wi-Fi password"))
+    {
+        return;
+    }
+
+    static const char command_prefix[] = "AT+camId=";
+    if (strncmp(line, command_prefix, sizeof(command_prefix) - 1) != 0)
+    {
+        ESP_LOGW(TAG, "Unknown command: %s", line);
+        return;
+    }
+
+    char *value = line + sizeof(command_prefix) - 1;
+    if (*value == '\0' || *value == '-' || *value == '+')
+    {
+        ESP_LOGW(TAG, "Invalid camId; expected AT+camId=<0..4294967295>");
+        return;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno == ERANGE || end == value || *end != '\0' || parsed > UINT32_MAX)
+    {
+        ESP_LOGW(TAG, "Invalid camId; expected AT+camId=<0..4294967295>");
+        return;
+    }
+
+    uint32_t previous_cam_id = cam_id_get();
+    esp_err_t ret = cam_id_save((uint32_t)parsed);
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(TAG, "camId set to %u and saved to NVS", (unsigned)parsed);
+        if ((uint32_t)parsed != previous_cam_id)
+        {
+            refresh_onenet_connection();
+        }
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Failed to save camId to NVS: %s", esp_err_to_name(ret));
+    }
+}
+
+static void console_task(void *arg)
+{
+    char line[256];
+    size_t length = 0;
+    size_t overflow_length = 0;
+    bool overflow = false;
+
+    while (true)
+    {
+        int character = getchar();
+        if (character == EOF)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (character == '\r' || character == '\n')
+        {
+            if (length > 0 || overflow)
+            {
+                if (!overflow)
+                {
+                    line[length] = '\0';
+                    process_console_command(line);
+                }
+                else
+                {
+                    ESP_LOGW(TAG,
+                             "Serial command exceeded %u-byte buffer (received %u bytes); "
+                             "discarded until line ending",
+                             (unsigned)(sizeof(line) - 1),
+                             (unsigned)(length + overflow_length));
+                }
+                length = 0;
+                overflow_length = 0;
+                overflow = false;
+            }
+        }
+        else if (overflow)
+        {
+            overflow_length++;
+        }
+        else
+        {
+            if (length < sizeof(line) - 1)
+            {
+                line[length++] = (char)character;
+            }
+            else
+            {
+                overflow = true;
+                overflow_length = 1;
+            }
+        }
+    }
+}
+
+static void usb_state_changed(usb_stream_state_t event, void *arg)
+{
+    if (event == STREAM_CONNECTED)
+    {
+        ESP_LOGI(TAG, "USB camera connected");
+        xEventGroupSetBits(s_usb_events, USB_CAMERA_CONNECTED_BIT);
+    }
+    else if (event == STREAM_DISCONNECTED)
+    {
+        ESP_LOGW(TAG, "USB camera disconnected");
+        xEventGroupClearBits(s_usb_events, USB_CAMERA_CONNECTED_BIT);
+    }
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
+        xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
+        status_led_set_wifi_connected(false);
+        ESP_LOGW(TAG, "Wi-Fi disconnected from SSID '%.*s' (reason %d); reconnecting",
+                 (int)sizeof(event->ssid), (const char *)event->ssid, event->reason);
+        esp_wifi_connect();
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "Wi-Fi connected, IP=" IPSTR, IP2STR(&event->ip_info.ip));
+        status_led_set_wifi_connected(true);
+        xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
+    }
+}
+
+static void wifi_init(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
+    s_wifi_events = xEventGroupCreate();
+    ESP_ERROR_CHECK(s_wifi_events ? ESP_OK : ESP_ERR_NO_MEM);
+
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL));
+
+    wifi_config_t wifi_config = {0};
+    size_t ssid_length = strlen(s_wifi_ssid);
+    memcpy(wifi_config.sta.ssid, s_wifi_ssid, ssid_length);
+    snprintf((char *)wifi_config.sta.password, sizeof(wifi_config.sta.password), "%s", s_wifi_password);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_LOGI(TAG, "Starting Wi-Fi with SSID '%s'", s_wifi_ssid);
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+static uint16_t calculate_crc16(const uint8_t *buffer, size_t length)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t position = 0; position < length; position++)
+    {
+        crc ^= buffer[position];
+        for (int bit = 0; bit < 8; bit++)
+        {
+            crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+        }
+    }
+    return crc;
+}
+
+static bool read_sensor_registers(uint8_t address, uint16_t *register_0, uint16_t *register_1)
+{
+    uint8_t query[8] = {address, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00};
+    uint16_t query_crc = calculate_crc16(query, 6);
+    query[6] = query_crc & 0xFF;
+    query[7] = query_crc >> 8;
+
+    uart_flush_input(SENSOR_UART_PORT);
+    if (uart_write_bytes(SENSOR_UART_PORT, (const char *)query, sizeof(query)) != (int)sizeof(query))
+    {
+        return false;
+    }
+
+    uint8_t response[32];
+    int length = uart_read_bytes(SENSOR_UART_PORT, response, sizeof(response), pdMS_TO_TICKS(150));
+    for (int offset = 0; offset <= length - 9; offset++)
+    {
+        if (response[offset] != address || response[offset + 1] != 0x03 || response[offset + 2] != 0x04)
+        {
+            continue;
+        }
+
+        uint16_t received_crc = response[offset + 7] | ((uint16_t)response[offset + 8] << 8);
+        if (calculate_crc16(&response[offset], 7) != received_crc)
+        {
+            continue;
+        }
+
+        *register_0 = ((uint16_t)response[offset + 3] << 8) | response[offset + 4];
+        *register_1 = ((uint16_t)response[offset + 5] << 8) | response[offset + 6];
+        return true;
+    }
+    return false;
+}
+
+static bool read_environment_sensors(sensor_reading_t *reading)
+{
+    uint16_t raw_temperature;
+    uint16_t raw_humidity;
+    uint16_t lux_high;
+    uint16_t lux_low;
+
+    if (!read_sensor_registers(TH_SENSOR_ADDRESS, &raw_temperature, &raw_humidity))
+    {
+        ESP_LOGW(TAG, "Temperature/humidity sensor read failed");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(40));
+    if (!read_sensor_registers(LUX_SENSOR_ADDRESS, &lux_high, &lux_low))
+    {
+        ESP_LOGW(TAG, "Light sensor read failed");
+        return false;
+    }
+
+    reading->temperature = (raw_temperature & 0x8000)
+                               ? -((float)(raw_temperature & 0x7FFF) / 10.0f)
+                               : (float)raw_temperature / 10.0f;
+    reading->humidity = (float)raw_humidity / 10.0f;
+    uint32_t raw_lux = lux_high > 0 && lux_low == 0
+                           ? lux_high
+                           : ((uint32_t)lux_high << 16) | lux_low;
+    reading->lux = (float)raw_lux;
+    return true;
+}
+
+static esp_err_t generate_onenet_token(char *token, size_t token_size, const char *device_id)
+{
+    unsigned char decoded_key[(MQTT_ACCESS_KEY_SIZE * 3) / 4];
+    size_t decoded_key_size = 0;
+    int ret = mbedtls_base64_decode(decoded_key, sizeof(decoded_key), &decoded_key_size,
+                                    (const unsigned char *)s_mqtt_access_key, strlen(s_mqtt_access_key));
+    if (ret != 0)
+    {
+        return ESP_FAIL;
+    }
+
+    time_t now = 0;
+    time(&now);
+    long expiration = now > 100000 ? (long)now + 86400 : 2000000000L;
+    char expiration_text[24];
+    snprintf(expiration_text, sizeof(expiration_text), "%ld", expiration);
+
+    char signature_source[192];
+    int source_size = snprintf(signature_source, sizeof(signature_source),
+                               "%s\nmd5\nproducts/%s/devices/%s\n2018-10-31",
+                               expiration_text, s_mqtt_product_id, device_id);
+    if (source_size < 0 || (size_t)source_size >= sizeof(signature_source))
+    {
+        return ESP_FAIL;
+    }
+
+    unsigned char hmac[16];
+    mbedtls_md_context_t context;
+    mbedtls_md_init(&context);
+    const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    ret = md_info == NULL ? MBEDTLS_ERR_MD_FEATURE_UNAVAILABLE : mbedtls_md_setup(&context, md_info, 1);
+    if (ret == 0)
+    {
+        ret = mbedtls_md_hmac_starts(&context, decoded_key, decoded_key_size);
+    }
+    if (ret == 0)
+    {
+        ret = mbedtls_md_hmac_update(&context, (const unsigned char *)signature_source, (size_t)source_size);
+    }
+    if (ret == 0)
+    {
+        ret = mbedtls_md_hmac_finish(&context, hmac);
+    }
+    mbedtls_md_free(&context);
+    if (ret != 0)
+    {
+        return ESP_FAIL;
+    }
+
+    unsigned char encoded[32];
+    size_t encoded_size = 0;
+    ret = mbedtls_base64_encode(encoded, sizeof(encoded), &encoded_size, hmac, sizeof(hmac));
+    if (ret != 0)
+    {
+        return ESP_FAIL;
+    }
+
+    char escaped_signature[64];
+    size_t escaped_size = 0;
+    for (size_t index = 0; index < encoded_size; index++)
+    {
+        const char *escape = encoded[index] == '+' ? "%2B" : encoded[index] == '/' ? "%2F"
+                                                         : encoded[index] == '='   ? "%3D"
+                                                                                   : NULL;
+        if (escape != NULL)
+        {
+            if (escaped_size + 3 >= sizeof(escaped_signature))
+            {
+                return ESP_ERR_INVALID_SIZE;
+            }
+            memcpy(&escaped_signature[escaped_size], escape, 3);
+            escaped_size += 3;
+        }
+        else
+        {
+            if (escaped_size + 1 >= sizeof(escaped_signature))
+            {
+                return ESP_ERR_INVALID_SIZE;
+            }
+            escaped_signature[escaped_size++] = (char)encoded[index];
+        }
+    }
+    escaped_signature[escaped_size] = '\0';
+
+    int token_length = snprintf(token, token_size,
+                                "version=2018-10-31&res=products%%2F%s%%2Fdevices%%2F%s&et=%s&method=md5&sign=%s",
+                                s_mqtt_product_id, device_id, expiration_text, escaped_signature);
+    return token_length < 0 || (size_t)token_length >= token_size ? ESP_ERR_INVALID_SIZE : ESP_OK;
+}
+
+static void log_onenet_mqtt_config(const char *stage, const char *device_id, const char *token)
+{
+    char topic[128];
+    snprintf(topic, sizeof(topic), "$sys/%s/%s/thing/property/post",
+             s_mqtt_product_id, device_id);
+    ESP_LOGI(TAG,
+             "OneNET MQTT %s: broker=%s, client_id=%s, username=%s, "
+             "password=<redacted> (token length=%u), publish_topic=%s",
+             stage, MQTT_BROKER_URI, device_id, s_mqtt_product_id,
+             (unsigned)strlen(token), topic);
+}
+
+static void refresh_onenet_connection(void)
+{
+    if (s_mqtt_client == NULL)
+    {
+        return;
+    }
+
+    char device_id[16];
+    mqtt_device_id_format(cam_id_get(), device_id, sizeof(device_id));
+    char token[256];
+    if (generate_onenet_token(token, sizeof(token), device_id) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to generate OneNET token");
+        return;
+    }
+    log_onenet_mqtt_config("reconnect config", device_id, token);
+
+    esp_mqtt_client_config_t config = {
+        .broker.address.uri = MQTT_BROKER_URI,
+        .credentials.client_id = device_id,
+        .credentials.username = s_mqtt_product_id,
+        .credentials.authentication.password = token,
+        .network.disable_auto_reconnect = true,
+    };
+    esp_err_t ret = esp_mqtt_set_config(s_mqtt_client, &config);
+    if (ret == ESP_OK)
+    {
+        ret = esp_mqtt_client_reconnect(s_mqtt_client);
+    }
+    if (ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "OneNET reconnect request failed: %s", esp_err_to_name(ret));
+    }
+}
+
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    switch ((esp_mqtt_event_id_t)event_id)
+    {
+    case MQTT_EVENT_CONNECTED:
+        s_mqtt_connected = true;
+        if (s_mqtt_retry_timer != NULL)
+        {
+            esp_timer_stop(s_mqtt_retry_timer);
+        }
+        ESP_LOGI(TAG, "OneNET MQTT connected");
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        s_mqtt_connected = false;
+        ESP_LOGW(TAG, "OneNET MQTT disconnected; scheduling retry in 2 seconds");
+        if (s_mqtt_retry_timer != NULL)
+        {
+            esp_err_t ret = esp_timer_start_once(s_mqtt_retry_timer, MQTT_RECONNECT_DELAY_US);
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
+            {
+                ESP_LOGE(TAG, "Failed to schedule OneNET MQTT retry: %s", esp_err_to_name(ret));
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void mqtt_init(void)
+{
+    char device_id[16];
+    mqtt_device_id_format(cam_id_get(), device_id, sizeof(device_id));
+    char token[256];
+    ESP_ERROR_CHECK(generate_onenet_token(token, sizeof(token), device_id));
+    log_onenet_mqtt_config("initial config", device_id, token);
+    esp_mqtt_client_config_t config = {
+        .broker.address.uri = MQTT_BROKER_URI,
+        .credentials.client_id = device_id,
+        .credentials.username = s_mqtt_product_id,
+        .credentials.authentication.password = token,
+        .network.disable_auto_reconnect = true,
+    };
+    s_mqtt_client = esp_mqtt_client_init(&config);
+    ESP_ERROR_CHECK(s_mqtt_client ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
+    const esp_timer_create_args_t retry_timer_args = {
+        .callback = mqtt_retry_timer_callback,
+        .name = "mqtt_retry",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&retry_timer_args, &s_mqtt_retry_timer));
+    ESP_ERROR_CHECK(esp_mqtt_client_start(s_mqtt_client));
+}
+
+static void sensor_poll_and_publish(sensor_reading_t *out_reading)
+{
+    sensor_reading_t reading = {0};
+    if (!read_environment_sensors(&reading))
+    {
+        if (out_reading) {
+            out_reading->temperature = 0.0f;
+            out_reading->humidity = 0.0f;
+            out_reading->lux = 0.0f;
+        }
+        return;
+    }
+
+    if (out_reading) {
+        *out_reading = reading;
+    }
+
+    ESP_LOGI(TAG, "Temperature=%.1f C, humidity=%.1f %%RH, illuminance=%.1f lux",
+             reading.temperature, reading.humidity, reading.lux);
+    if (!s_mqtt_connected)
+    {
+        ESP_LOGW(TAG, "OneNET is not connected; sensor values were not published to MQTT");
+        return;
+    }
+
+    time_t now = 0;
+    time(&now);
+    char payload[256];
+    snprintf(payload, sizeof(payload),
+             "{\"id\":\"%lu\",\"version\":\"1.0\",\"params\":{"
+             "\"temp\":{\"value\":%.1f},\"hum\":{\"value\":%.1f},\"lux\":{\"value\":%.1f}}}",
+             (unsigned long)now, reading.temperature, reading.humidity, reading.lux);
+    char topic[128];
+    char device_id[16];
+    mqtt_device_id_format(cam_id_get(), device_id, sizeof(device_id));
+    snprintf(topic, sizeof(topic), "$sys/%s/%s/thing/property/post", s_mqtt_product_id, device_id);
+    int message_id = esp_mqtt_client_publish(s_mqtt_client, topic, payload, 0, 1, 0);
+    if (message_id < 0)
+    {
+        ESP_LOGE(TAG, "Failed to queue sensor data for OneNET");
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Sensor data queued for OneNET, message id=%d", message_id);
+    }
+}
+
+static void sensor_uart_init(void)
+{
+    const uart_config_t config = {
+        .baud_rate = 9600,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    ESP_ERROR_CHECK(uart_driver_install(SENSOR_UART_PORT, SENSOR_UART_BUFFER_SIZE * 2, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(SENSOR_UART_PORT, &config));
+    ESP_ERROR_CHECK(uart_set_pin(SENSOR_UART_PORT, SENSOR_UART_TX_GPIO, SENSOR_UART_RX_GPIO,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+}
+
+static void camera_frame_cb(uvc_frame_t *frame, void *user_ptr)
+{
+    if (frame->frame_format != UVC_FRAME_FORMAT_MJPEG)
+    {
+        return;
+    }
+
+    if (!s_first_frame_logged)
+    {
+        ESP_LOGI(TAG, "First MJPEG frame received: %ux%u, %u bytes",
+                 (unsigned)frame->width, (unsigned)frame->height, (unsigned)frame->data_bytes);
+        s_first_frame_logged = true;
+    }
+
+    portENTER_CRITICAL(&s_capture_mux);
+    bool requested = s_capture_requested;
+    if (requested)
+    {
+        s_capture_requested = false;
+    }
+    portEXIT_CRITICAL(&s_capture_mux);
+
+    if (!requested)
+    {
+        return;
+    }
+
+    if (frame->data_bytes <= CAMERA_BUFFER_SIZE)
+    {
+        s_capture_data = frame->data;
+        s_capture_size = frame->data_bytes;
+    }
+    else
+    {
+        s_capture_data = NULL;
+        s_capture_size = 0;
+        ESP_LOGW(TAG, "MJPEG frame too large: %u bytes", (unsigned)frame->data_bytes);
+    }
+    xSemaphoreGive(s_capture_ready);
+    xSemaphoreTake(s_capture_release, portMAX_DELAY);
+}
+
+static bool capture_frame(void)
+{
+    xSemaphoreTake(s_capture_ready, 0);
+    s_capture_data = NULL;
+    s_capture_size = 0;
+    portENTER_CRITICAL(&s_capture_mux);
+    s_capture_requested = true;
+    portEXIT_CRITICAL(&s_capture_mux);
+
+    if (xSemaphoreTake(s_capture_ready, pdMS_TO_TICKS(CAPTURE_TIMEOUT_MS)) != pdTRUE)
+    {
+        portENTER_CRITICAL(&s_capture_mux);
+        s_capture_requested = false;
+        portEXIT_CRITICAL(&s_capture_mux);
+        ESP_LOGW(TAG, "Timed out waiting for a camera frame");
+        return false;
+    }
+    return s_capture_size > 0;
+}
+
+static bool http_write_all(esp_http_client_handle_t client, const char *data, size_t size)
+{
+    while (size > 0)
+    {
+        int written = esp_http_client_write(client, data, (int)size);
+        if (written <= 0)
+        {
+            return false;
+        }
+        data += written;
+        size -= (size_t)written;
+    }
+    return true;
+}
+
+static bool write_base64_image(esp_http_client_handle_t client)
+{
+    unsigned char encoded[4 * ((BASE64_INPUT_CHUNK_SIZE + 2) / 3) + 1];
+    size_t offset = 0;
+
+    while (offset < s_capture_size)
+    {
+        size_t remaining = s_capture_size - offset;
+        size_t input_size = remaining > BASE64_INPUT_CHUNK_SIZE
+                                ? BASE64_INPUT_CHUNK_SIZE
+                                : remaining;
+        size_t encoded_size = 0;
+        int ret = mbedtls_base64_encode(encoded, sizeof(encoded), &encoded_size,
+                                        s_capture_data + offset, input_size);
+        if (ret != 0)
+        {
+            ESP_LOGE(TAG, "Base64 encoding failed at offset %u: %d", (unsigned)offset, ret);
+            return false;
+        }
+        if (!http_write_all(client, (const char *)encoded, encoded_size))
+        {
+            ESP_LOGE(TAG, "HTTP write failed at image offset %u/%u, errno=%d",
+                     (unsigned)offset, (unsigned)s_capture_size,
+                     esp_http_client_get_errno(client));
+            return false;
+        }
+        offset += input_size;
+    }
+    return true;
+}
+
+// 包含了传感器数值的打包上传函数
+static void upload_frame_with_sensors(const sensor_reading_t *reading)
+{
+    if (!(xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT))
+    {
+        ESP_LOGW(TAG, "Wi-Fi is not connected; skipping upload");
+        return;
+    }
+
+    size_t encoded_size = 4 * ((s_capture_size + 2) / 3);
+    char prefix[160];
+    int prefix_length = snprintf(prefix, sizeof(prefix),
+                                 "{\"camId\":%u,\"temp\":%.1f,\"hum\":%.1f,\"lux\":%.1f,\"message\":\"",
+                                 (unsigned)cam_id_get(),
+                                 reading->temperature,
+                                 reading->humidity,
+                                 reading->lux);
+    if (prefix_length < 0 || (size_t)prefix_length >= sizeof(prefix))
+    {
+        ESP_LOGE(TAG, "Failed to format upload JSON prefix");
+        return;
+    }
+    static const char suffix[] = "\"}";
+    const size_t prefix_size = (size_t)prefix_length;
+    const size_t suffix_size = sizeof(suffix) - 1;
+    const size_t content_length = prefix_size + encoded_size + suffix_size;
+
+    ESP_LOGI(TAG, "Uploading JPEG + Sensors data (%u bytes) to Google Sheets", (unsigned)content_length);
+
+    esp_http_client_config_t config = {
+        .url = UPLOAD_URL,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = 40000,
+        .buffer_size = 4096,
+        .buffer_size_tx = 8192,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .disable_auto_redirect = true,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to initialize HTTPS client");
+        return;
+    }
+
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+
+    esp_err_t ret = esp_http_client_open(client, (int)content_length);
+    bool request_sent = false;
+
+    if (ret == ESP_OK)
+    {
+        status_led_flash_blue();
+        request_sent = http_write_all(client, prefix, prefix_size) &&
+                       write_base64_image(client) &&
+                       http_write_all(client, suffix, suffix_size);
+    }
+
+    if (request_sent)
+    {
+        esp_http_client_fetch_headers(client);
+        int status = esp_http_client_get_status_code(client);
+
+        if ((status >= 200 && status < 300) || status == 302)
+        {
+            ESP_LOGI(TAG, "Upload accepted by Google Apps Script, HTTP status %d", status);
+        }
+        else
+        {
+            ESP_LOGE(TAG, "Google endpoint response status %d", status);
+        }
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Data upload failed: %s", esp_err_to_name(ret));
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+}
+
+static void photo_task(void *arg)
+{
+    TickType_t last_wake_time = xTaskGetTickCount();
+    while (true)
+    {
+        xEventGroupWaitBits(s_usb_events, USB_CAMERA_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(CAPTURE_INTERVAL_MS));
+        
+        // 1. 读取环境传感器数值
+        sensor_reading_t current_reading = {0};
+        sensor_poll_and_publish(&current_reading);
+
+        // 2. 抓取摄像头图像并连同传感器数据一并上报 Google Sheets
+        if (capture_frame())
+        {
+            upload_frame_with_sensors(&current_reading);
+            xSemaphoreGive(s_capture_release);
+        }
+    }
+}
+
+void app_main(void)
+{
+    status_led_init();
+
+    esp_err_t nvs_result = nvs_flash_init();
+    if (nvs_result == ESP_ERR_NVS_NO_FREE_PAGES || nvs_result == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_result = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_result);
+    ESP_ERROR_CHECK(cam_id_load());
+    ESP_ERROR_CHECK(config_string_load(MQTT_PRODUCT_ID_NVS_KEY, s_mqtt_product_id, sizeof(s_mqtt_product_id)));
+    ESP_ERROR_CHECK(config_string_load(MQTT_ACCESS_KEY_NVS_KEY, s_mqtt_access_key, sizeof(s_mqtt_access_key)));
+    ESP_ERROR_CHECK(config_string_load(WIFI_SSID_NVS_KEY, s_wifi_ssid, sizeof(s_wifi_ssid)));
+    ESP_ERROR_CHECK(config_string_load(WIFI_PASSWORD_NVS_KEY, s_wifi_password, sizeof(s_wifi_password)));
+
+    s_capture_ready = xSemaphoreCreateBinary();
+    s_capture_release = xSemaphoreCreateBinary();
+    s_usb_events = xEventGroupCreate();
+    ESP_ERROR_CHECK(s_capture_ready && s_capture_release && s_usb_events ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(xTaskCreate(console_task, "console_task", 3072, NULL, 4, NULL) == pdPASS
+                        ? ESP_OK
+                        : ESP_ERR_NO_MEM);
+    wifi_init();
+    ESP_LOGI(TAG, "Waiting for Wi-Fi before initializing USB camera");
+    xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    sensor_uart_init();
+    mqtt_init();
+
+#if defined(CONFIG_PHOTO_BOARD_ESP32S3_USB_OTG)
+    const gpio_config_t usb_mode_config = {
+        .pin_bit_mask = BIT64(GPIO_NUM_18),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&usb_mode_config));
+    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_18, 1));
+
+    const gpio_config_t usb_power_config = {
+        .pin_bit_mask = BIT64(GPIO_NUM_17) | BIT64(GPIO_NUM_12) | BIT64(GPIO_NUM_13),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&usb_power_config));
+    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_17, 1));
+    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_12, 0));
+    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_13, 0));
+    vTaskDelay(pdMS_TO_TICKS(10));
+    ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_12, 1));
+#endif
+
+    uint8_t *xfer_buffer_a = malloc(CAMERA_BUFFER_SIZE);
+    uint8_t *xfer_buffer_b = malloc(CAMERA_BUFFER_SIZE);
+    uint8_t *frame_buffer = malloc(CAMERA_BUFFER_SIZE);
+    ESP_ERROR_CHECK(xfer_buffer_a && xfer_buffer_b && frame_buffer ? ESP_OK : ESP_ERR_NO_MEM);
+
+    uvc_config_t uvc_config = {
+        .frame_width = 480,
+        .frame_height = 320,
+        .frame_interval = FPS2INTERVAL(15),
+        .xfer_buffer_size = CAMERA_BUFFER_SIZE,
+        .xfer_buffer_a = xfer_buffer_a,
+        .xfer_buffer_b = xfer_buffer_b,
+        .frame_buffer_size = CAMERA_BUFFER_SIZE,
+        .frame_buffer = frame_buffer,
+        .frame_cb = camera_frame_cb,
+        .frame_cb_arg = NULL,
+    };
+    ESP_ERROR_CHECK(uvc_streaming_config(&uvc_config));
+    ESP_ERROR_CHECK(usb_streaming_state_register(usb_state_changed, NULL));
+    ESP_ERROR_CHECK(usb_streaming_start());
+
+    ESP_LOGI(TAG, "Camera streaming started; reading sensors and capturing every %d seconds", CAPTURE_INTERVAL_MS / 1000);
+    ESP_ERROR_CHECK(xTaskCreate(photo_task, "photo_task", 8192, NULL, 5, NULL) == pdPASS
+                        ? ESP_OK
+                        : ESP_ERR_NO_MEM);
+}
