@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32 生态监测仪表板</title>
+  <title>鳥巢監測 dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root {
@@ -204,13 +204,13 @@
 
     <!-- 1. 最顶部：最新拍摄照片 (自适应固定比例 + 黑边) -->
     <div class="hero-photo-container">
-      <h3 class="section-title">📷 实时最新抓拍</h3>
+      <h3 class="section-title">最新抓拍</h3>
       <div class="aspect-ratio-box">
-        <img id="latestPhoto" src="" alt="等待接收最新抓拍图像..." style="display: none;">
-        <span id="latestPhotoPlaceholder" style="color: #aaa;">加载最新照片中...</span>
+        <img id="latestPhoto" src="" alt="等待接收最新抓拍圖像..." style="display: none;">
+        <span id="latestPhotoPlaceholder" style="color: #aaa;">加載最新圖像中...</span>
         <div class="hero-photo-info" id="latestPhotoMeta" style="display: none;">
           <span id="heroCamId">Camera ID: --</span>
-          <span id="heroTimestamp">时间: --</span>
+          <span id="heroTimestamp">時間: --</span>
         </div>
       </div>
     </div>
@@ -218,36 +218,36 @@
     <!-- 2. 最新传感器数据 -->
     <div class="cards">
       <div class="card">
-        <div class="label">🌡️ 温度</div>
+        <div class="label">🌡️ 溫度</div>
         <div class="value" id="tempVal">-- °C</div>
       </div>
       <div class="card">
-        <div class="label">💧 湿度</div>
+        <div class="label">💧 濕度</div>
         <div class="value" id="humVal">-- %</div>
       </div>
       <div class="card">
-        <div class="label">☀️ 光照强度</div>
+        <div class="label">☀️ 光照強度</div>
         <div class="value" id="luxVal">-- lx</div>
       </div>
     </div>
 
     <!-- 3. 历史数据趋势 -->
     <div class="chart-container">
-      <h3 class="section-title">📈 历史数据趋势</h3>
+      <h3 class="section-title">曆史數據趨勢</h3>
       <canvas id="envChart" height="100"></canvas>
     </div>
 
     <!-- 4. 历史照片选择器与照片墙 -->
     <div class="gallery-container">
-      <h3 class="section-title">🖼️ 历史照片查询</h3>
+      <h3 class="section-title">曆史照片查詢</h3>
       
       <div class="filter-bar">
         <div>
-          <label for="datePicker">选择日期：</label>
+          <label for="datePicker">選擇日期：</label>
           <input type="date" id="datePicker">
         </div>
         <div>
-          <label for="timeFilter">具体时间：</label>
+          <label for="timeFilter">具體時間：</label>
           <select id="timeFilter">
             <option value="all">全天照片</option>
           </select>
@@ -255,7 +255,7 @@
       </div>
 
       <div class="grid" id="photoGrid">
-        <div class="no-data">正在载入照片记录...</div>
+        <div class="no-data">正在載入圖像記錄...</div>
       </div>
     </div>
   </div>
@@ -299,7 +299,7 @@
             metaEl.style.display = 'flex';
 
             document.getElementById('heroCamId').innerText = `Camera ID: ${latestPhotoRow.camId}`;
-            document.getElementById('heroTimestamp').innerText = `拍摄时间: ${new Date(latestPhotoRow.timestamp).toLocaleString()}`;
+            document.getElementById('heroTimestamp').innerText = `拍攝時間: ${new Date(latestPhotoRow.timestamp).toLocaleString()}`;
           }
 
           // 2. 更新传感器当前最新数值
@@ -315,7 +315,7 @@
           initDatePickerAndGallery();
         }
       } catch (err) {
-        console.error("加载数据失败:", err);
+        console.error("加載數據失敗:", err);
       }
     }
 
@@ -335,8 +335,8 @@
         data: {
           labels: labels,
           datasets: [
-            { label: '温度 (°C)', data: temps, borderColor: '#e74c3c', fill: false, tension: 0.2, yAxisID: 'y' },
-            { label: '湿度 (%)', data: hums, borderColor: '#3498db', fill: false, tension: 0.2, yAxisID: 'y' },
+            { label: '溫度 (°C)', data: temps, borderColor: '#e74c3c', fill: false, tension: 0.2, yAxisID: 'y' },
+            { label: '濕度 (%)', data: hums, borderColor: '#3498db', fill: false, tension: 0.2, yAxisID: 'y' },
             { label: '光照 (lx)', data: luxs, borderColor: '#f1c40f', fill: false, tension: 0.2, yAxisID: 'y1' }
           ]
         },
@@ -344,7 +344,7 @@
           responsive: true,
           interaction: { mode: 'index', intersect: false },
           scales: {
-            y: { type: 'linear', position: 'left', title: { display: true, text: '温湿度' } },
+            y: { type: 'linear', position: 'left', title: { display: true, text: '溫濕度' } },
             y1: { type: 'linear', position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: '光照 (lx)' } }
           }
         }
@@ -406,7 +406,7 @@
       }
 
       if (displayPhotos.length === 0) {
-        photoGrid.innerHTML = '<div class="no-data">该选择日期下未检索到历史照片</div>';
+        photoGrid.innerHTML = '<div class="no-data">該選擇日期下未檢索到圖像</div>';
         return;
       }
 
@@ -415,7 +415,7 @@
         const item = document.createElement('div');
         item.className = 'photo-item';
         item.innerHTML = `
-          <a href="${row.imageUrl}" target="_blank" title="点击查看原图">
+          <a href="${row.imageUrl}" target="_blank" title="點擊查看原圖">
             <img src="${row.imageUrl}" alt="ESP32 照片">
           </a>
           <div class="time">${new Date(row.timestamp).toLocaleString()}</div>
